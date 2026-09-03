@@ -34,9 +34,15 @@ Load `prompts/interview.md`. Ask the four batches, or only the gaps the source a
 
 ### 4. Copy the scaffold, never overwrite
 
-Copy every file and folder from `scaffold/` into the current directory, including `.claude/`, `.gitignore`, and `scripts/`. Use a form that carries dotfiles (`cp -R scaffold/. <dest>/` semantics) but apply these rules on top:
+Copy every file and folder from `scaffold/` into the current directory, including `.claude/`, `.gitignore`, and `scripts/`. Run exactly this form, which carries dotfiles and never overwrites:
 
-- A path that already exists at the destination is skipped and listed as a collision.
+```bash
+cp -Rn "<skill-dir>/scaffold/." .
+```
+
+Plain `cp -R` overwrites collisions; do not use it. On macOS, `cp -n` exits 1 when it skipped an existing file; that is a collision report, not a failure. Then apply these rules:
+
+- A path that already existed at the destination was skipped by `-n`. List each such path as a collision.
 - `.claude/settings.json` already present: merge the scaffold's one `PostToolUse` hook entry into the existing `hooks.PostToolUse` list. Do not replace the file.
 - The current directory is the project root. Do not create a nested subfolder.
 - Do not modify files under `scaffold/` at the source.

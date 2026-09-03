@@ -62,6 +62,11 @@ DECISION_HEADINGS = [
 ]
 STATUS_VALUES = {"pending", "decided", "superseded"}
 LOG_CELLS = 7
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+PROVENANCE_DIRS = ("source", "ingestion")
+LOG_PROVENANCE_DIRS = ("source", "ingestion", "decisions")
+INSTANCE_DIRS = ("context", "rules", "packets", "decisions", "risks", "ingestion", "maintenance")
+TOP_LEVEL_MD = ("INDEX.md", "CLAUDE.md", "AGENTS.md", "README.md")
 
 PROVENANCE_RES = (
     re.compile(r"\(stakeholder-verbal,\s*[^,]+,\s*\d{4}-\d{2}-\d{2}\)\s*`?\s*$", re.I),
@@ -109,18 +114,30 @@ def _link_resolves(target: str, base: Path) -> bool:
     return (base / target).resolve().exists()
 
 
-def has_provenance(row: str, base: Path) -> bool:
-    """A row is tagged when it ends with an enum tag, `Unknown`, or a resolvable relative link."""
+def _provenance_link_ok(target: str, base: Path, root: Path, dirs: tuple[str, ...]) -> bool:
+    """A provenance link must be a real file under one of the allowed instance folders."""
+    target = target.split("#", 1)[0].strip()
+    if not target or "<" in target or "{{" in target or target.startswith(("http://", "https://")):
+        return False
+    resolved = (base / target).resolve()
+    if not resolved.is_file():
+        return False
+    try:
+        rel = resolved.relative_to(root.resolve())
+    except ValueError:
+        return False
+    return len(rel.parts) > 1 and rel.parts[0] in dirs
+
+
+def has_provenance(row: str, base: Path, root: Path, dirs: tuple[str, ...] = PROVENANCE_DIRS) -> bool:
+    """A row is tagged when it ends with an enum tag, `Unknown`, or a link into an allowed folder."""
     if any(rx.search(row) for rx in PROVENANCE_RES):
         return True
     links = LINK_RE.findall(row)
     if links:
-        text, target = links[-1]
-        stripped = row[: row.rfind("[" + text + "]")].rstrip()
+        _, target = links[-1]
         after = row[row.rfind("(" + target + ")") + len(target) + 2 :].strip().strip("`")
-        if after == "" and _link_resolves(target, base):
-            return True
-        if stripped and after == "" and _link_resolves(target, base):
+        if after == "" and _provenance_link_ok(target, base, root, dirs):
             return True
     return False
 
@@ -129,10 +146,10 @@ def check_required(root: Path) -> list[str]:
     return [f"{rel}: required file missing" for rel in REQUIRED_FILES if not (root / rel).is_file()]
 
 
-def check_links(path: Path, root: Path) -> list[str]:
+def check_links(path: Path, root: Path, text: str) -> list[str]:
     if path.name == "_SCHEMA.md":
         return []
-    text = _strip_code(path.read_text(encoding="utf-8"))
+    text = _strip_code(text)
     out = []
     for _, target in LINK_RE.findall(text):
         if not _link_resolves(target, path.parent):
@@ -163,17 +180,34 @@ def _is_decision_record(path: Path, root: Path) -> bool:
     )
 
 
-def check_decision(path: Path, root: Path) -> list[str]:
-    text = path.read_text(encoding="utf-8")
+def _first_value(text: str, heading: str) -> str:
+    return next((l.strip() for l in _section(text, heading) if l.strip()), "")
+
+
+def check_decision(path: Path, root: Path, text: str) -> list[str]:
     rel = _rel(path, root)
+    text = _strip_code(text)
     headings = {re.sub(r"^#{2,6}\s+", "", h).strip().lower() for h in re.findall(r"^#{2,6}\s+.*$", text, re.M)}
     out = []
     for h in DECISION_HEADINGS:
         if h.lower() not in headings:
             out.append(f"{rel}: missing heading '## {h}'")
-    status = next((l.strip() for l in _section(text, "Status") if l.strip()), "")
-    if status and status.lower() not in STATUS_VALUES:
+    status = _first_value(text, "Status")
+    if not status:
+        out.append(f"{rel}: missing value under '## Status'")
+    elif status.lower() not in STATUS_VALUES:
         out.append(f"{rel}: status '{status}' not in {sorted(STATUS_VALUES)}")
+    if not _first_value(text, "Decider"):
+        out.append(f"{rel}: missing value under '## Decider'")
+    date = _first_value(text, "Date")
+    if date and not DATE_RE.match(date):
+        out.append(f"{rel}: '## Date' value '{date}' is not YYYY-MM-DD")
+    review = _first_value(text, "Review date")
+    if not review:
+        out.append(f"{rel}: missing value under '## Review date'")
+    elif not (DATE_RE.match(review) or review.startswith("Unknown")):
+        out.append(f"{rel}: '## Review date' value '{review}' is not YYYY-MM-DD or Unknown")
+    evidence_rows = 0
     for heading in ("Evidence", "Explicitly NOT doing"):
         for i, line in enumerate(_section(text, heading), 1):
             m = re.match(r"^\s*[-*]\s+(.*)$", line)
@@ -182,15 +216,19 @@ def check_decision(path: Path, root: Path) -> list[str]:
             row = m.group(1).strip()
             if not row or PLACEHOLDER_RE.match(row):
                 continue
-            if not has_provenance(row, path.parent):
+            if heading == "Evidence":
+                evidence_rows += 1
+            if not has_provenance(row, path.parent, root):
                 out.append(f"{rel}: untagged row {i} under '## {heading}': {row[:60]}")
+    if status.lower() == "decided" and evidence_rows == 0:
+        out.append(f"{rel}: decided record has no evidence row")
     return out
 
 
-def check_log(path: Path, root: Path) -> list[str]:
+def check_log(path: Path, root: Path, text: str) -> list[str]:
     rel = _rel(path, root)
     out = []
-    rows = [l for l in path.read_text(encoding="utf-8").splitlines() if l.lstrip().startswith("|")]
+    rows = [l for l in text.splitlines() if l.lstrip().startswith("|")]
     for n, line in enumerate(rows):
         if n < 2:
             continue  # header and separator
@@ -201,7 +239,7 @@ def check_log(path: Path, root: Path) -> list[str]:
         status = cells[4].lower()
         if status not in STATUS_VALUES:
             out.append(f"{rel}: row {n + 1} status '{cells[4]}' not in {sorted(STATUS_VALUES)}")
-        if not has_provenance(cells[3], path.parent):
+        if not has_provenance(cells[3], path.parent, root, LOG_PROVENANCE_DIRS):
             out.append(f"{rel}: row {n + 1} evidence cell has no tag, link, or Unknown")
     return out
 
@@ -210,20 +248,37 @@ def validate_file(path: Path, root: Path) -> tuple[list[str], list[str]]:
     """Returns (blocking, warnings)."""
     if path.suffix != ".md" or not path.is_file():
         return [], []
-    warnings = check_links(path, root)
+    text = path.read_text(encoding="utf-8")
+    warnings = check_links(path, root, text)
     blocking: list[str] = []
     if _is_decision_record(path, root):
-        blocking += check_decision(path, root)
+        blocking += check_decision(path, root, text)
     if _rel(path, root) == "decisions/LOG.md":
-        blocking += check_log(path, root)
+        blocking += check_log(path, root, text)
     return blocking, warnings
+
+
+def _in_instance(rel: str) -> bool:
+    """Only the instance's own files are validated; source/ is verbatim and host files are not ours."""
+    parts = rel.split("/")
+    if len(parts) == 1:
+        return parts[0] in TOP_LEVEL_MD
+    return parts[0] in INSTANCE_DIRS or rel == "source/INDEX.md"
+
+
+def _instance_paths(root: Path):
+    for name in TOP_LEVEL_MD:
+        if (root / name).is_file():
+            yield root / name
+    for d in INSTANCE_DIRS:
+        yield from sorted((root / d).rglob("*.md"))
+    if (root / "source" / "INDEX.md").is_file():
+        yield root / "source" / "INDEX.md"
 
 
 def validate_dir(root: Path) -> list[str]:
     findings = check_required(root)
-    for path in sorted(root.rglob("*.md")):
-        if ".git" in path.parts:
-            continue
+    for path in _instance_paths(root):
         b, w = validate_file(path, root)
         findings += b + w
     return findings
@@ -241,7 +296,7 @@ def _hook() -> int:
     if not path.exists() or path.suffix != ".md":
         return 0
     root = find_root(path)
-    if root is None:
+    if root is None or not _in_instance(_rel(path, root)):
         return 0
     blocking, warnings = validate_file(path, root)
     if warnings:

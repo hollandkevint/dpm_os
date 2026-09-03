@@ -50,16 +50,14 @@ Adoption under 20 percent by 2026-03-01.
 """
 
 
+def _copy_if_absent(src: str, dst: str) -> None:
+    if not Path(dst).exists():
+        shutil.copy2(src, dst)
+
+
 def copy_scaffold(dest: Path) -> None:
     """Copy scaffold/. into dest without overwriting existing files (KTD6)."""
-    for src in SCAFFOLD.rglob("*"):
-        rel = src.relative_to(SCAFFOLD)
-        target = dest / rel
-        if src.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        elif not target.exists():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, target)
+    shutil.copytree(SCAFFOLD, dest, dirs_exist_ok=True, copy_function=_copy_if_absent)
 
 
 def run_cli(root: Path) -> subprocess.CompletedProcess:
@@ -158,6 +156,43 @@ class ScaffoldTests(unittest.TestCase):
         self.assertEqual(hook.returncode, 2)
         self.assertIn("BLOCKING", hook.stderr)
 
+    def test_placeholder_link_is_not_provenance(self):
+        bad = RECORD.replace("[ingestion/note.md](../ingestion/note.md)", "[source/<file>](../source/<file>)")
+        (self.tmp / "decisions" / "2026-01-05-ship.md").write_text(bad)
+        self.assertIn("untagged row 2", run_cli(self.tmp).stdout)
+
+    def test_self_link_and_index_link_are_not_provenance(self):
+        for target in ("2026-01-05-ship.md", "../INDEX.md", "./"):
+            bad = RECORD.replace("[ingestion/note.md](../ingestion/note.md)", f"[x]({target})")
+            (self.tmp / "decisions" / "2026-01-05-ship.md").write_text(bad)
+            self.assertIn("untagged row 2", run_cli(self.tmp).stdout, target)
+
+    def test_hollow_record_fails(self):
+        hollow = "# D\n" + "".join(f"## {h}\n\n" for h in validate.DECISION_HEADINGS)
+        (self.tmp / "decisions" / "2026-01-05-hollow.md").write_text(hollow)
+        out = run_cli(self.tmp).stdout
+        for field in ("Status", "Decider", "Review date"):
+            self.assertIn(f"missing value under '## {field}'", out)
+
+    def test_decided_record_needs_evidence(self):
+        bad = RECORD.replace("- The buyer asked for it  (stakeholder-verbal, A. Person, 2026-01-04)\n", "").replace(
+            "- Prior note  [ingestion/note.md](../ingestion/note.md)\n", "- (none yet)\n")
+        (self.tmp / "decisions" / "2026-01-05-ship.md").write_text(bad)
+        self.assertIn("decided record has no evidence row", run_cli(self.tmp).stdout)
+
+    def test_fenced_headings_do_not_count(self):
+        fenced = "# D\n```markdown\n" + RECORD + "\n```\n"
+        (self.tmp / "decisions" / "2026-01-05-ship.md").write_text(fenced)
+        self.assertIn("missing heading '## Status'", run_cli(self.tmp).stdout)
+
+    def test_source_and_host_markdown_not_scanned(self):
+        (self.tmp / "source" / "brief.md").write_text("[x](../nowhere.md)\n")
+        (self.tmp / "node_modules").mkdir()
+        (self.tmp / "node_modules" / "README.md").write_text("[y](./missing.md)\n")
+        r = run_cli(self.tmp)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(run_hook(self.tmp / "source" / "brief.md").returncode, 0)
+
     def test_hook_outside_instance_exits_zero(self):
         outside = Path(tempfile.mkdtemp()) / "loose.md"
         outside.write_text("- untagged claim\n")
@@ -179,19 +214,20 @@ class NoOverwriteTests(unittest.TestCase):
         self.assertEqual((self.tmp / "notes.md").read_text(), "notes\n")
         self.assertTrue((self.tmp / "INDEX.md").is_file())
 
-    def test_settings_merge_keeps_existing_key(self):
+    def test_existing_settings_json_untouched(self):
         (self.tmp / ".claude").mkdir()
         existing = self.tmp / ".claude" / "settings.json"
-        existing.write_text(json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}}))
+        original = json.dumps({"permissions": {"allow": ["Bash(ls:*)"]}})
+        existing.write_text(original)
         copy_scaffold(self.tmp)
-        merged = json.loads(existing.read_text())
-        scaffold_hooks = json.loads((SCAFFOLD / ".claude" / "settings.json").read_text())["hooks"]
-        merged.setdefault("hooks", {}).setdefault("PostToolUse", [])
-        merged["hooks"]["PostToolUse"] += scaffold_hooks["PostToolUse"]
-        existing.write_text(json.dumps(merged))
-        final = json.loads(existing.read_text())
-        self.assertIn("permissions", final)
-        self.assertEqual(final["hooks"]["PostToolUse"][0]["hooks"][0]["command"], "python3 scripts/validate.py")
+        self.assertEqual(existing.read_text(), original)
+
+    def test_cp_rn_form_from_skill_does_not_overwrite(self):
+        (self.tmp / "CLAUDE.md").write_text("mine\n")
+        # cp -n exits 1 on macOS when it skips an existing file; the copy is still correct.
+        subprocess.run(["cp", "-Rn", str(SCAFFOLD) + "/.", str(self.tmp)], capture_output=True)
+        self.assertEqual((self.tmp / "CLAUDE.md").read_text(), "mine\n")
+        self.assertTrue((self.tmp / ".claude" / "settings.json").is_file())
 
 
 if __name__ == "__main__":
