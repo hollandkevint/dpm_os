@@ -22,5 +22,6 @@ python3 .claude/skills/dpm-os/scaffold/scripts/validate.py .claude/skills/dpm-os
 - `.claude/skills/dpm-os/SKILL.md` — the initializer
 - `.claude/skills/dpm-os/prompts/` — mode detection, migration, interview, post-scaffold
 - `.claude/skills/dpm-os/scaffold/` — the instance, copied as-is
-- `tests/` — validator tests and the containment test
+- `grader/` — sample grader: questions, answer-key SQL, harnesses, ship rule
+- `tests/` — validator, grader, and containment tests
 - `docs/install.md` — install and uninstall
