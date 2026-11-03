@@ -9,6 +9,7 @@ This repo ships one Claude Code skill, `dpm-os`, that scaffolds a DPM OS instanc
 - **No CE artifacts here.** Plans, solutions, and other compound-engineering documents live outside this repo.
 - **Bump `SCAFFOLD_VERSION`** in `scaffold/README.md` when the scaffold changes shape.
 - **Stdlib only** in `scripts/validate.py`. It must run on a bare `python3`.
+- **Shared skills: public wins.** `data-product-operator` owns the body of every analysis skill the initializer names. A private collection copies those bodies unchanged. A private-only difference goes in a sibling `overlay.md` in the private copy, never as an edit to the shared `SKILL.md`. Improve a shared skill in the library first, then re-sync.
 
 ## Test
 
