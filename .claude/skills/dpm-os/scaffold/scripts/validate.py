@@ -6,10 +6,14 @@ CLI mode:   python3 scripts/validate.py <instance-dir>
 Hook mode:  no argument, Claude Code PostToolUse JSON on stdin.
             Validates the written file only. Exit 2 on a blocking finding
             (missing decision heading, bad status, untagged evidence row,
-            malformed log row), exit 0 with a stderr warning on a broken link.
+            malformed log row), exit 0 with a stderr warning on a broken link
+            or an untagged populated context file.
+Summary:    python3 scripts/validate.py --summary <instance-dir>
+            context sections populated, and populated context files tagged.
 
 Checks: required files, relative markdown links, decision-record headings,
-decision-log row shape, provenance tags on evidence rows and log rows.
+decision-log row shape, provenance tags on evidence rows and log rows, and a
+provenance tag under '## Provenance' in every populated context file.
 Stdlib only.
 """
 
@@ -74,8 +78,13 @@ PROVENANCE_RES = (
     re.compile(r"\(hub,\s*[^,]+,\s*\d{4}-\d{2}-\d{2}\)\s*`?\s*$", re.I),
     re.compile(r"\(industry-knowledge\)\s*`?\s*$", re.I),
     re.compile(r"\(chat,\s*no artifact\)\s*`?\s*$", re.I),
-    re.compile(r"\bUnknown(\s*\([^)]*\))?\s*`?\s*$"),
 )
+UNKNOWN_RE = re.compile(r"\bUnknown(\s*\([^)]*\))?\s*`?\s*$")
+PROVENANCE_RES += (UNKNOWN_RE,)
+COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
+TABLE_SEP_RE = re.compile(r"^\|?[\s:|-]*-{3,}[\s:|-]*$")
+CONTEXT_DIR = "context"
+PROVENANCE_HEADING = "Provenance"
 LINK_RE = re.compile(r"\[([^\]]*)\]\(([^)]+)\)")
 FENCE_RE = re.compile(r"^```[^\n]*\n.*?^```[ \t]*$", re.S | re.M)
 INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
@@ -244,12 +253,88 @@ def check_log(path: Path, root: Path, text: str) -> list[str]:
     return out
 
 
+def _h2_sections(text: str) -> list[tuple[str, list[str]]]:
+    """(heading, lines) for each `## ` section, with HTML comments and code removed."""
+    text = COMMENT_RE.sub("", _strip_code(text))
+    out: list[tuple[str, list[str]]] = []
+    for line in text.splitlines():
+        m = re.match(r"^##\s+(.*?)\s*$", line)
+        if m:
+            out.append((m.group(1), []))
+        elif out:
+            out[-1][1].append(line)
+    return out
+
+
+def _populated(lines: list[str]) -> bool:
+    """True when a section holds real content: prose, a list item, or a table row with a filled cell after the first.
+
+    The first cell is skipped because templates ship row labels (role names) in it.
+    """
+    in_table = False
+    for line in lines:
+        s = line.strip()
+        if not s.startswith("|"):
+            in_table = False
+            if s:
+                return True
+            continue
+        if not in_table:  # header row
+            in_table = True
+            continue
+        if TABLE_SEP_RE.match(s):
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        if any(cells[1:]):
+            return True
+    return False
+
+
+def context_status(path: Path, root: Path, text: str) -> dict:
+    """Counts for one context file: content sections, populated ones, and its provenance tag."""
+    sections = _h2_sections(text)
+    content = [lines for h, lines in sections if h.lower() != PROVENANCE_HEADING.lower()]
+    provenance = next((lines for h, lines in sections if h.lower() == PROVENANCE_HEADING.lower()), [])
+    tags = [l.strip() for l in provenance if l.strip() and has_provenance(l.strip(), path.parent, root)]
+    return {
+        "sections": len(content),
+        "populated": sum(_populated(lines) for lines in content),
+        "tagged": bool(tags),
+        "unknown": any(UNKNOWN_RE.search(t) for t in tags),
+    }
+
+
+def _is_context_file(path: Path, root: Path) -> bool:
+    rel = _rel(path, root)
+    return rel.startswith(f"{CONTEXT_DIR}/") and rel.count("/") == 1 and path.suffix == ".md"
+
+
+def check_context(path: Path, root: Path, text: str) -> list[str]:
+    status = context_status(path, root, text)
+    if status["populated"] and not status["tagged"]:
+        return [f"{_rel(path, root)}: populated context has no provenance tag under '## {PROVENANCE_HEADING}'"]
+    return []
+
+
+def context_summary(root: Path) -> list[str]:
+    files = sorted((root / CONTEXT_DIR).glob("*.md"))
+    stats = [context_status(p, root, p.read_text(encoding="utf-8")) for p in files]
+    populated = [s for s in stats if s["populated"]]
+    return [
+        f"context sections populated: {sum(s['populated'] for s in stats)} of {sum(s['sections'] for s in stats)}",
+        f"context files populated: {len(populated)} of {len(stats)}, "
+        f"tagged: {sum(s['tagged'] for s in populated)}, Unknown: {sum(s['unknown'] for s in populated)}",
+    ]
+
+
 def validate_file(path: Path, root: Path) -> tuple[list[str], list[str]]:
     """Returns (blocking, warnings)."""
     if path.suffix != ".md" or not path.is_file():
         return [], []
     text = path.read_text(encoding="utf-8")
     warnings = check_links(path, root, text)
+    if _is_context_file(path, root):
+        warnings += check_context(path, root, text)
     blocking: list[str] = []
     if _is_decision_record(path, root):
         blocking += check_decision(path, root, text)
@@ -308,6 +393,13 @@ def _hook() -> int:
 
 
 def main(argv: list[str]) -> int:
+    if len(argv) == 3 and argv[1] == "--summary":
+        root = Path(argv[2])
+        if not root.is_dir():
+            print(f"{argv[2]}: not a directory")
+            return 1
+        print("\n".join(context_summary(root)))
+        return 0
     if len(argv) > 1:
         root = Path(argv[1])
         if not root.is_dir():
