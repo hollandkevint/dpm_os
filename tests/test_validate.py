@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -286,6 +287,37 @@ class ManifestTests(unittest.TestCase):
 
     def test_manifest_includes_every_required_file(self):
         self.assertLessEqual(set(validate.REQUIRED_FILES), set(manifest()))
+
+    def test_initializer_docs_name_only_manifest_paths(self):
+        files = manifest()
+        docs = [SKILL_DIR / "SKILL.md", *sorted((SKILL_DIR / "prompts").glob("*.md"))]
+        for doc in docs:
+            self.assertEqual(unknown_paths(doc.read_text(), files), [], doc.name)
+
+    def test_unknown_path_is_caught(self):
+        files = manifest()
+        text = "Fill `context/missing.md`, skip `packets/<date>-weekly-packet.md` and `prompts/*.md`."
+        self.assertEqual(unknown_paths(text, files), ["context/missing.md"])
+
+
+SKILL_DIR = SCAFFOLD.parent
+BACKTICK_RE = re.compile(r"`([^`\s]+)`")
+
+
+def unknown_paths(text: str, files: list[str]) -> list[str]:
+    """Backticked scaffold file paths that the manifest does not list.
+
+    A token counts when its first segment is a scaffold folder and it ends in a file
+    extension. Placeholders (`<...>`), globs, and folders are skipped.
+    """
+    folders = {f.split("/", 1)[0] for f in files if "/" in f}
+    out = []
+    for token in BACKTICK_RE.findall(text):
+        if any(c in token for c in "<*") or token.endswith("/") or "/" not in token:
+            continue
+        if token.split("/", 1)[0] in folders and re.search(r"\.\w+$", token) and token not in files:
+            out.append(token)
+    return out
 
 
 class NoOverwriteTests(unittest.TestCase):
