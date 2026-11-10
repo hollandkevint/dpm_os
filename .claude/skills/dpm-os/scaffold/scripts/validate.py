@@ -8,6 +8,8 @@ Hook mode:  no argument, Claude Code PostToolUse JSON on stdin.
             (missing decision heading, bad status, untagged evidence row,
             malformed log row), exit 0 with a stderr warning on a broken link
             or an untagged populated context file.
+Manifest:   python3 scripts/validate.py --manifest
+            every file the scaffold ships, one path per line.
 Summary:    python3 scripts/validate.py --summary <instance-dir>
             context sections populated, and populated context files tagged.
 
@@ -54,6 +56,10 @@ REQUIRED_FILES = [
     "maintenance/scorecard.md",
     "maintenance/owner-guide.md",
 ]
+# Shipped by the scaffold but not required: init skips it when the operator already has one.
+OPTIONAL_FILES = [".gitignore"]
+# Every file the scaffold ships. Install verification and uninstall read this list.
+MANIFEST = REQUIRED_FILES + OPTIONAL_FILES
 
 DECISION_HEADINGS = [
     "Status",
@@ -352,13 +358,14 @@ def _in_instance(rel: str) -> bool:
 
 
 def _instance_paths(root: Path):
-    for name in TOP_LEVEL_MD:
-        if (root / name).is_file():
-            yield root / name
-    for d in INSTANCE_DIRS:
-        yield from sorted((root / d).rglob("*.md"))
-    if (root / "source" / "INDEX.md").is_file():
-        yield root / "source" / "INDEX.md"
+    """Markdown files the CLI scans. The walk stays inside instance folders, so a host
+    repo's node_modules is never read; _in_instance alone decides what counts."""
+    candidates = [root / name for name in TOP_LEVEL_MD]
+    for d in INSTANCE_DIRS + ("source",):
+        candidates += sorted((root / d).rglob("*.md"))
+    for path in candidates:
+        if path.is_file() and _in_instance(_rel(path, root)):
+            yield path
 
 
 def validate_dir(root: Path) -> list[str]:
@@ -393,6 +400,9 @@ def _hook() -> int:
 
 
 def main(argv: list[str]) -> int:
+    if argv[1:] == ["--manifest"]:
+        print("\n".join(MANIFEST))
+        return 0
     if len(argv) == 3 and argv[1] == "--summary":
         root = Path(argv[2])
         if not root.is_dir():

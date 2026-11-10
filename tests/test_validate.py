@@ -270,6 +270,24 @@ class ContextProvenanceTests(unittest.TestCase):
         self.assertIn("context files populated: 2 of 7, tagged: 2, Unknown: 1", r.stdout)
 
 
+def manifest() -> list[str]:
+    r = subprocess.run([sys.executable, str(VALIDATE), "--manifest"], capture_output=True, text=True, check=True)
+    return r.stdout.splitlines()
+
+
+class ManifestTests(unittest.TestCase):
+    def test_manifest_matches_the_scaffold_tree(self):
+        shipped = {
+            p.relative_to(SCAFFOLD).as_posix()
+            for p in SCAFFOLD.rglob("*")
+            if p.is_file() and "__pycache__" not in p.parts
+        }
+        self.assertEqual(set(manifest()), shipped)
+
+    def test_manifest_includes_every_required_file(self):
+        self.assertLessEqual(set(validate.REQUIRED_FILES), set(manifest()))
+
+
 class NoOverwriteTests(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
