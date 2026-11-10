@@ -235,6 +235,11 @@ class ContextProvenanceTests(unittest.TestCase):
         r = run_cli(self.tmp)
         self.assertEqual(r.returncode, 0, r.stdout)
 
+    def test_backticked_tag_under_provenance_passes(self):
+        fill(self.product, "Out of scope", "- Real-time feeds.", "- `(stakeholder-verbal, A. Person, 2026-01-04)`")
+        r = run_cli(self.tmp)
+        self.assertEqual(r.returncode, 0, r.stdout)
+
     def test_unknown_under_provenance_passes(self):
         fill(self.product, "Out of scope", "- Real-time feeds.", "Unknown")
         r = run_cli(self.tmp)

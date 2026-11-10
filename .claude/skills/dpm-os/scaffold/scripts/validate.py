@@ -25,6 +25,7 @@ import json
 import re
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 REQUIRED_FILES = [
     "AGENTS.md",
@@ -58,7 +59,6 @@ REQUIRED_FILES = [
 ]
 # Shipped by the scaffold but not required: init skips it when the operator already has one.
 OPTIONAL_FILES = [".gitignore"]
-# Every file the scaffold ships. Install verification and uninstall read this list.
 MANIFEST = REQUIRED_FILES + OPTIONAL_FILES
 
 DECISION_HEADINGS = [
@@ -78,15 +78,15 @@ LOG_PROVENANCE_DIRS = ("source", "ingestion", "decisions")
 INSTANCE_DIRS = ("context", "rules", "packets", "decisions", "risks", "ingestion", "maintenance")
 TOP_LEVEL_MD = ("INDEX.md", "CLAUDE.md", "AGENTS.md", "README.md")
 
+UNKNOWN_RE = re.compile(r"\bUnknown(\s*\([^)]*\))?\s*`?\s*$")
 PROVENANCE_RES = (
     re.compile(r"\(stakeholder-verbal,\s*[^,]+,\s*\d{4}-\d{2}-\d{2}\)\s*`?\s*$", re.I),
     re.compile(r"\(intuition,\s*[^,]+,\s*\d{4}-\d{2}-\d{2}\)\s*`?\s*$", re.I),
     re.compile(r"\(hub,\s*[^,]+,\s*\d{4}-\d{2}-\d{2}\)\s*`?\s*$", re.I),
     re.compile(r"\(industry-knowledge\)\s*`?\s*$", re.I),
     re.compile(r"\(chat,\s*no artifact\)\s*`?\s*$", re.I),
+    UNKNOWN_RE,
 )
-UNKNOWN_RE = re.compile(r"\bUnknown(\s*\([^)]*\))?\s*`?\s*$")
-PROVENANCE_RES += (UNKNOWN_RE,)
 COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 TABLE_SEP_RE = re.compile(r"^\|?[\s:|-]*-{3,}[\s:|-]*$")
 CONTEXT_DIR = "context"
@@ -260,8 +260,8 @@ def check_log(path: Path, root: Path, text: str) -> list[str]:
 
 
 def _h2_sections(text: str) -> list[tuple[str, list[str]]]:
-    """(heading, lines) for each `## ` section, with HTML comments and code removed."""
-    text = COMMENT_RE.sub("", _strip_code(text))
+    # Inline code stays: a provenance tag is often written in backticks.
+    text = COMMENT_RE.sub("", FENCE_RE.sub("", text))
     out: list[tuple[str, list[str]]] = []
     for line in text.splitlines():
         m = re.match(r"^##\s+(.*?)\s*$", line)
@@ -273,41 +273,48 @@ def _h2_sections(text: str) -> list[tuple[str, list[str]]]:
 
 
 def _populated(lines: list[str]) -> bool:
-    """True when a section holds real content: prose, a list item, or a table row with a filled cell after the first.
-
-    The first cell is skipped because templates ship row labels (role names) in it.
-    """
-    in_table = False
+    seen_header = False
     for line in lines:
         s = line.strip()
         if not s.startswith("|"):
-            in_table = False
+            seen_header = False
             if s:
                 return True
             continue
-        if not in_table:  # header row
-            in_table = True
+        if not seen_header:
+            seen_header = True
             continue
         if TABLE_SEP_RE.match(s):
             continue
-        cells = [c.strip() for c in s.strip("|").split("|")]
-        if any(cells[1:]):
+        # Templates ship row labels (role names) in the first cell, so only the other cells count.
+        _label, *values = [c.strip() for c in s.strip("|").split("|")]
+        if any(values):
             return True
     return False
 
 
-def context_status(path: Path, root: Path, text: str) -> dict:
-    """Counts for one context file: content sections, populated ones, and its provenance tag."""
-    sections = _h2_sections(text)
-    content = [lines for h, lines in sections if h.lower() != PROVENANCE_HEADING.lower()]
-    provenance = next((lines for h, lines in sections if h.lower() == PROVENANCE_HEADING.lower()), [])
+class ContextStatus(NamedTuple):
+    sections: int
+    populated: int
+    tagged: bool
+    unknown: bool
+
+
+def context_status(path: Path, root: Path, text: str) -> ContextStatus:
+    content: list[list[str]] = []
+    provenance: list[str] = []
+    for heading, lines in _h2_sections(text):
+        if heading.lower() == PROVENANCE_HEADING.lower():
+            provenance = lines
+        else:
+            content.append(lines)
     tags = [l.strip() for l in provenance if l.strip() and has_provenance(l.strip(), path.parent, root)]
-    return {
-        "sections": len(content),
-        "populated": sum(_populated(lines) for lines in content),
-        "tagged": bool(tags),
-        "unknown": any(UNKNOWN_RE.search(t) for t in tags),
-    }
+    return ContextStatus(
+        sections=len(content),
+        populated=sum(_populated(lines) for lines in content),
+        tagged=bool(tags),
+        unknown=any(UNKNOWN_RE.search(t) for t in tags),
+    )
 
 
 def _is_context_file(path: Path, root: Path) -> bool:
@@ -317,7 +324,7 @@ def _is_context_file(path: Path, root: Path) -> bool:
 
 def check_context(path: Path, root: Path, text: str) -> list[str]:
     status = context_status(path, root, text)
-    if status["populated"] and not status["tagged"]:
+    if status.populated and not status.tagged:
         return [f"{_rel(path, root)}: populated context has no provenance tag under '## {PROVENANCE_HEADING}'"]
     return []
 
@@ -325,11 +332,11 @@ def check_context(path: Path, root: Path, text: str) -> list[str]:
 def context_summary(root: Path) -> list[str]:
     files = sorted((root / CONTEXT_DIR).glob("*.md"))
     stats = [context_status(p, root, p.read_text(encoding="utf-8")) for p in files]
-    populated = [s for s in stats if s["populated"]]
+    populated = [s for s in stats if s.populated]
     return [
-        f"context sections populated: {sum(s['populated'] for s in stats)} of {sum(s['sections'] for s in stats)}",
+        f"context sections populated: {sum(s.populated for s in stats)} of {sum(s.sections for s in stats)}",
         f"context files populated: {len(populated)} of {len(stats)}, "
-        f"tagged: {sum(s['tagged'] for s in populated)}, Unknown: {sum(s['unknown'] for s in populated)}",
+        f"tagged: {sum(s.tagged for s in populated)}, Unknown: {sum(s.unknown for s in populated)}",
     ]
 
 
@@ -358,11 +365,11 @@ def _in_instance(rel: str) -> bool:
 
 
 def _instance_paths(root: Path):
-    """Markdown files the CLI scans. The walk stays inside instance folders, so a host
-    repo's node_modules is never read; _in_instance alone decides what counts."""
+    # Walk only instance folders, never the host repo, so an active-repo root's node_modules is not read.
     candidates = [root / name for name in TOP_LEVEL_MD]
-    for d in INSTANCE_DIRS + ("source",):
+    for d in INSTANCE_DIRS:
         candidates += sorted((root / d).rglob("*.md"))
+    candidates.append(root / "source" / "INDEX.md")
     for path in candidates:
         if path.is_file() and _in_instance(_rel(path, root)):
             yield path
@@ -403,18 +410,16 @@ def main(argv: list[str]) -> int:
     if argv[1:] == ["--manifest"]:
         print("\n".join(MANIFEST))
         return 0
-    if len(argv) == 3 and argv[1] == "--summary":
-        root = Path(argv[2])
-        if not root.is_dir():
-            print(f"{argv[2]}: not a directory")
-            return 1
-        print("\n".join(context_summary(root)))
-        return 0
+    summary = len(argv) == 3 and argv[1] == "--summary"
     if len(argv) > 1:
-        root = Path(argv[1])
+        arg = argv[2] if summary else argv[1]
+        root = Path(arg)
         if not root.is_dir():
-            print(f"{argv[1]}: not a directory")
+            print(f"{arg}: not a directory")
             return 1
+        if summary:
+            print("\n".join(context_summary(root)))
+            return 0
         findings = validate_dir(root)
         for f in findings:
             print(f)
